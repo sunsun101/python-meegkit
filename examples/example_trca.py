@@ -35,6 +35,11 @@ import numpy as np
 import scipy.io
 from meegkit.trca import TRCA
 from meegkit.utils.trca import itr, normfit, round_half_up
+from mne.io import RawArray
+from mne import create_info
+from mne.channels import make_standard_montage
+import mne
+from sklearn.utils import shuffle
 
 t = time.time()
 
@@ -48,12 +53,13 @@ is_ensemble = True  # True = ensemble TRCA method; False = TRCA method
 alpha_ci = 0.05   # 100*(1-alpha_ci): confidence interval for accuracy
 sfreq = 250  # sampling rate [Hz]
 dur_shift = 0.5  # duration for gaze shifting [s]
-list_freqs = np.array(
-    [[x + 8.0 for x in range(8)],
-     [x + 8.2 for x in range(8)],
-     [x + 8.4 for x in range(8)],
-     [x + 8.6 for x in range(8)],
-     [x + 8.8 for x in range(8)]]).T  # list of stimulus frequencies
+# list_freqs = np.array(
+#     [[x + 8.0 for x in range(8)],
+#      [x + 8.2 for x in range(8)],
+#      [x + 8.4 for x in range(8)],
+#      [x + 8.6 for x in range(8)],
+#      [x + 8.8 for x in range(8)]]).T  # list of stimulus frequencies
+list_freqs = np.array([8, 8.2, 8.4, 8.6, 8.8, 9, 9.2, 9.4, 9.6])
 n_targets = list_freqs.size  # The number of stimuli
 
 # Useful variables (no need to modify)
@@ -65,18 +71,59 @@ ci = 100 * (1 - alpha_ci)  # confidence interval
 ###############################################################################
 # Load data
 # -----------------------------------------------------------------------------
-path = os.path.join('..', 'tests', 'data', 'trcadata.mat')
-eeg = scipy.io.loadmat(path)["eeg"]
+# path = os.path.join('..', 'tests', 'data', 'trcadata.mat')
+path = os.path.join('..', 'tests', 'data', 'sunsun.mat')
 
-n_trials, n_chans, n_samples, n_blocks = eeg.shape
+# eeg = scipy.io.loadmat(path)["eeg"]
+eeg = scipy.io.loadmat(path)["data"]
+
+print("EEG shape at the beginning ==>", eeg.shape)
+
+eeg = np.transpose(eeg, (0, 3, 2, 1))
+
+_CHANNELS = ['FZ', 'C3', 'CZ', 'C4', 'PZ', 'PO7', 'OZ', 'PO8']
+ch_names = [ch_name.upper() for ch_name in _CHANNELS]
+ch_names = ch_names + ['STIM']
+ch_types = ["eeg"] * 9
+ch_types[-1] = "stim"
+
+info = create_info(ch_names=ch_names, ch_types=ch_types, sfreq=250)
+montage = make_standard_montage("standard_1020")
+montage.rename_channels(
+    {ch_name: ch_name.upper() for ch_name in montage.ch_names}
+)
+print("this", np.reshape(eeg, (eeg.shape[0], -1)))
+raw = RawArray(
+        data=np.reshape(eeg, (eeg.shape[0], -1)), 
+        info=info
+    )
+raw.set_montage(montage)
+
+events = mne.find_events(raw)
+labels = events[:,-1]
+print("Labels ===>",labels)
+labels = np.array([x - 1 for x in labels])
+print("shape of label ==>", labels.shape)
+print(eeg.shape)
+
+eeg = eeg[:-1,:,:,:]
+print("Shape of data", eeg.shape)
+
+# n_trials, n_chans, n_samples, n_blocks = eeg.shape
+n_chans, n_trials, n_blocks, n_samples = eeg.shape
 
 # Convert dummy Matlab format to (sample, channels, trials) and construct
 # vector of labels
 eeg = np.reshape(eeg.transpose([2, 1, 3, 0]),
                  (n_samples, n_chans, n_trials * n_blocks))
-labels = np.array([x for x in range(n_targets)] * n_blocks)
+
+print("Shape of data", eeg.shape)
+# labels = np.array([x for x in range(n_targets)] * n_blocks)
 crop_data = np.arange(delay_s, delay_s + dur_gaze_s)
 eeg = eeg[crop_data]
+
+
+
 
 ###############################################################################
 # TRCA classification
@@ -129,27 +176,42 @@ trca = TRCA(sfreq, filterbank, is_ensemble)
 print('Results of the ensemble TRCA-based method:\n')
 accs = np.zeros(n_blocks)
 itrs = np.zeros(n_blocks)
+print("No of blocks", n_blocks)
+
+print("No of trials", n_trials)
+
+k = 4
+
 for i in range(n_blocks):
 
     # Select all folds except one for training
     traindata = np.concatenate(
-        (eeg[..., :i * n_trials],
-         eeg[..., (i + 1) * n_trials:]), 2)
+        (eeg[..., :i * k],
+         eeg[..., (i + 1) * k:]), 2)
+    
+    
     y_train = np.concatenate(
-        (labels[:i * n_trials], labels[(i + 1) * n_trials:]), 0)
+        (labels[:i * k], labels[(i + 1) * k:]), 0)
+    
+    print("X train", traindata.shape)
+    print("y train", y_train)
 
     # Construction of the spatial filter and the reference signals
     trca.fit(traindata, y_train)
 
     # Test stage
-    testdata = eeg[..., i * n_trials:(i + 1) * n_trials]
-    y_test = labels[i * n_trials:(i + 1) * n_trials]
+    testdata = eeg[..., i * k:(i + 1) * k]
+    y_test = labels[i * k:(i + 1) * k]
+
+    print("X test", testdata.shape)
+    print("y test", y_test)
+
     estimated = trca.predict(testdata)
 
     # Evaluation of the performance for this fold (accuracy and ITR)
     is_correct = estimated == y_test
     accs[i] = np.mean(is_correct) * 100
-    itrs[i] = itr(n_targets, np.mean(is_correct), dur_sel_s)
+    # itrs[i] = itr(n_targets, np.mean(is_correct), dur_sel_s)
     print(f"Block {i}: accuracy = {accs[i]:.1f}, \tITR = {itrs[i]:.1f}")
 
 # Mean accuracy and ITR computation
@@ -157,7 +219,7 @@ mu, _, muci, _ = normfit(accs, alpha_ci)
 print(f"\nMean accuracy = {mu:.1f}%\t({ci:.0f}% CI: {muci[0]:.1f}-{muci[1]:.1f}%)")  # noqa
 
 mu, _, muci, _ = normfit(itrs, alpha_ci)
-print(f"Mean ITR = {mu:.1f}\t({ci:.0f}% CI: {muci[0]:.1f}-{muci[1]:.1f})")
+# print(f"Mean ITR = {mu:.1f}\t({ci:.0f}% CI: {muci[0]:.1f}-{muci[1]:.1f})")
 if is_ensemble:
     ensemble = 'ensemble TRCA-based method'
 else:
