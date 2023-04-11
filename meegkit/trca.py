@@ -99,6 +99,7 @@ class TRCA:
 
         for class_i in classes:
             # Select data with a specific label
+            print("class", class_i)
             eeg_tmp = X[..., y == class_i]
             for fb_i in range(self.n_bands):
                 # Filter the signal with fb_i
@@ -116,6 +117,8 @@ class TRCA:
                     w_best = trca(eeg_tmp)
                 elif self.method == 'riemann':
                     w_best = trca_regul(eeg_tmp, self.estimator)
+                elif self.method == 'crosscorrelation':
+                    w_best = trca_crosscorrelation(eeg_tmp)
                 else:
                     raise ValueError('Invalid `method` option.')
 
@@ -321,6 +324,83 @@ def trca_regul(X, method):
         S = mean_covariance(S, metric='riemann')
     else:
         S = mean_covariance(S, metric='logeuclid')
+
+    # 3. Compute eigenvalues and vectors
+    # -------------------------------------------------------------------------
+    lambdas, W = linalg.eig(S, Q, left=True, right=False)
+
+    # Select the eigenvector corresponding to the biggest eigenvalue
+    W_best = W[:, np.argmax(lambdas)]
+
+    return W_best
+
+
+
+def get_corr(a,b, latency=20):
+    cross_correlation = abs(np.correlate(a,b, mode='same'))
+    center_idx = len(cross_correlation) // 2
+    max_corr = cross_correlation[center_idx-latency  : center_idx+latency].max()
+    return max_corr
+
+def trca_crosscorrelation(X):
+    latency=250
+    n_samples, n_chans, n_trials = theshapeof(X)
+
+    # 1. Compute empirical covariance of all data (to be bounded)
+    # -------------------------------------------------------------------------
+    # Concatenate all the trials to have all the data as a sequence
+    UX = np.zeros((n_chans, n_samples * n_trials))
+    for trial in range(n_trials):
+        UX[:, trial * n_samples:(trial + 1) * n_samples] = X[..., trial].T
+
+    # Mean centering
+    UX -= np.mean(UX, 1)[:, None]
+
+    # Covariance
+    # Q = UX @ UX.T
+    # Use my cross correlation
+    Q = np.zeros((UX.shape[0],UX.shape[0]))
+    for i in range(UX.shape[0]):
+        for j in range(UX.shape[0]):
+            a = UX[i]
+            b = UX[j]
+            Q[i,j] = get_corr(a,b,latency=latency)
+    # 2. Compute average empirical covariance between all pairs of trials
+    # -------------------------------------------------------------------------
+    S = np.zeros((n_chans, n_chans))
+    for i in range(n_chans):
+        for j in range(n_chans):
+            # n_samples, n_chans, n_trials 
+            x_i = X[:, i, :]
+            x_j = X[:, j, :]
+            # print(f"{x_i.shape=}")
+            # print(f"{x_j.shape=}")
+            for t1 in range(n_trials):
+                for t2 in range(n_trials):
+                    if(t1 == t2): continue
+                    x_i_t1 = np.squeeze(x_i[:,t1])
+                    x_i_t1 -= x_i_t1.mean()
+
+                    x_j_t2 = np.squeeze(x_j[:,t2])
+                    x_j_t2 -= x_j_t2.mean()
+                    
+                    S[i,j] += get_corr(x_i_t1, x_j_t2, latency=latency)
+    # for trial_i in range(n_trials - 1):
+    #     x1 = np.squeeze(X[..., trial_i])
+
+    #     # Mean centering for the selected trial
+    #     x1 -= np.mean(x1, 0)
+
+    #     # Select a second trial that is different
+    #     for trial_j in range(trial_i + 1, n_trials):
+    #         x2 = np.squeeze(X[..., trial_j])
+
+    #         # Mean centering for the selected trial
+    #         x2 -= np.mean(x2, 0)
+
+    #         # Compute empirical covariance between the two selected trials and
+    #         # sum it
+    #         S = S + x1.T @ x2 + x2.T @ x1
 
     # 3. Compute eigenvalues and vectors
     # -------------------------------------------------------------------------
